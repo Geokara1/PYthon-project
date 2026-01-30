@@ -4,6 +4,11 @@ import logging
 import random
 from enum import Enum, auto
 
+import tools          # Από τον R2
+import prompts        # Από τον R3
+import llm_engine     # Από τον R3
+
+
 # 1. EXECUTION TRACE LOGGING 
 # Ρυθμίζουμε το logging ώστε να εμφανίζει STATE, PROMPT, RAW LLM, ACTION.
 # Αυτά τα logs είναι υποχρεωτικά παραδοτέα (Killer Criterion)
@@ -30,7 +35,8 @@ class AgentState(Enum):
 
 # 3. THE AGENT CLASS 
 class EnergyGridAgent:
-    def __init__(self):
+    
+    def __init__(self,hf_token=None): #SOS Hf_token για API key
     # current_state: Η μεταβλητή ελέγχου της FSM 
         self.current_state = AgentState.INITIALIZING
         self.is_running = True
@@ -47,24 +53,9 @@ class EnergyGridAgent:
         # το ιστορικό των τελευταίων N βημάτων για να υπάρχει συνείδηση
         self.history = []
         self.max_history = 5
-
-    def get_system_prompt(self):
-        """
-        #CONSTRAINT ENFORCEMENT 
-        #Ο κώδικας ελέγχει το current_state ΠΡΙΝ καλέσει το LLM και 
-        προσαρμόζει το System Prompt. Έτσι, ο πράκτορας γνωρίζει 
-        τους περιορισμούς της τρέχουσας κατάστασης.
-        """
-        prompts = {
-            AgentState.INITIALIZING: "System Check mode. Verify all grid sensors.",
-            AgentState.DEMAND_FORECASTING: "Forecasting mode. Use weather data to predict MW demand.",
-            AgentState.CAPACITY_ANALYSIS: "Resource Analysis mode. Evaluate Solar, Wind, and Gas availability.",
-            AgentState.DISPATCH_PLANNING: "Planning mode. Balance supply/demand with minimum cost.",
-            AgentState.STABILITY_CHECK: "Evaluation mode. If blackout risk is High, you MUST trigger ADJUSTMENT.",
-            AgentState.ADJUSTMENT: "Replanning mode. Modify the previous failed plan to restore stability."
-        }
-        return prompts.get(self.current_state, "You are an Energy Grid Balancer.")
-
+        #LLm Engine απο Cognitive Policy Engineer
+        self.llm = llm_engine.LLMEngine(api_token=hf_token)
+         
     def observe(self):
         """
         OBSERVE 
@@ -78,19 +69,19 @@ class EnergyGridAgent:
         
         #THINK 
         
-        system_prompt = self.get_system_prompt()
-        logging.info(f"[PROMPT]: {system_prompt}")
+        # system Prompt απο Cοnstraint Enforcement
+        system_prompt = prompts.get_system_prompt(self.current_state, observations)
+        
+        logging.info(f"[PROMPT SENT TO LLM]")
+        
+        # Χρήση Self.llm που ειναι στην __init__
+         # Καλούμε τη μέθοδο get_decision του Constrait Enforcement
+        decision = self.llm.get_decision(system_prompt, self.history)
 
-        # Προσομοίωση απόκρισης LLM σε μορφή JSON String
-        # Ο R3 θα αντικαταστήσει αυτή τη λογική με πραγματικό API call
-        decision_logic = self._mock_llm_logic()
+        logging.info(f"[RAW LLM]: {json.dumps(decision)}")
+
         
-        # Μετατροπή σε JSON String για προσομοίωση του API 
-        raw_llm_json = json.dumps(decision_logic)
-        logging.info(f"[RAW LLM]: {raw_llm_json}")
-        
-        # JSON Parsing: Μετατροπή του string πίσω σε Python αντικείμενο
-        return json.loads(raw_llm_json)
+        return decision
 
     def act(self, decision):
 
@@ -99,16 +90,21 @@ class EnergyGridAgent:
         
         action_type = decision.get("action_type")
         target = decision.get("target")
+        params =decision.get("params",{})
 
         if action_type == "TRANSITION":
-            # Δυναμική μετάβαση βάσει κρίσης LLM 
-            logging.info(f"[ACTION]: Transitioning to {target}")
-            self.current_state = AgentState[target]
+                logging.info(f"[ACTION]: Transitioning to {target}")
+                try:
+                # Μετατροπή του String από το LLM στο Enum AgentState
+                    self.current_state = AgentState[target]
+                except KeyError:
+                    logging.error(f"Invalid State Name: {target}. Defaulting to ADJUSTMENT.")
+                    self.current_state = AgentState.ADJUSTMENT
         
         elif action_type == "TOOL_CALL":
             # Κλήση εξωτερικής συνάρτησης 
-            logging.info(f"[ACTION]: Calling Tool {target} with params {decision.get('params')}")
-            self._update_memory_from_tool(target, decision.get('params'))
+            logging.info(f"[ACTION]: Executing Tool {target}")
+            self._update_memory_from_tool(target, params)
 
         # Έλεγχος για τερματισμό
         if self.current_state == AgentState.TERMINATED:
@@ -120,63 +116,74 @@ class EnergyGridAgent:
         Εδώ ενημερώνεται τα Observations 
         μετά από κάθε κλήση εργαλείου.
         """
-        if tool_name == "forecast_demand":
-            self.memory["forecast_mw"] = 120.5 # Mock τιμή
-        elif tool_name == "check_capacity":
-            self.memory["capacity"] = {"solar": 40, "wind": 20, "gas": 100}
+         # 1. Σύνδεση με το Tool Πρόβλεψης Ζήτησης
+        if tool_name == "forecast_energy_demand":
+        # Λήψη παραμέτρου από το LLM (π.χ. {"hour_offset": 1})
+            offset = params.get("hour_offset", 1)
+        # Κλήση του πραγματικού εργαλείου του R2
+            res = tools.forecast_energy_demand(offset)
+        # Ενημέρωση της "Αλήθειας" του πράκτορα
+            self.memory["forecast_mw"] = res
+            logging.info(f"[OBSERVATION]: Predicted demand: {res} MW")
 
-    def _mock_llm_logic(self):
-        """
-        MOCK POLICY 
-        Προσομοιώνει πώς το LLM θα επέλεγε την επόμενη κίνηση
-        Θα αντικατασταθεί πλήρως από τον R3
-        """
-      
-        if self.current_state == AgentState.DEMAND_FORECASTING and self.memory["forecast_mw"] > 0:
-            return {"action_type": "TRANSITION", "target": "CAPACITY_ANALYSIS"}
+    # 2. Σύνδεση με το Tool Ελέγχου Πηγών
+        elif tool_name == "check_generation_capacity":
+        # Κλήση του εργαλείου του R2
+            res = tools.check_generation_capacity()
+            self.memory["capacity"] = res
+            logging.info(f"[OBSERVATION]: Available capacity: {res}")
+
+    # 3. Σύνδεση με το Tool Εκτέλεσης Πλάνου
+        elif tool_name == "dispatch_energy_plan":
+        # Λήψη του πλάνου που αποφάσισε το LLM
+            dist = params.get("distribution", {})
+        # Εφαρμογή στο δίκτυο μέσω του R2
+            res = tools.dispatch_energy_plan(dist)
+        # Αποθήκευση των metrics ευστάθειας (Κρίσιμο για το Feedback Loop)
+            self.memory["last_metrics"] = res
+
             
-        # Default ροή
-        mapping = {
-            AgentState.INITIALIZING: {"action_type": "TRANSITION", "target": "DEMAND_FORECASTING"},
-            AgentState.CAPACITY_ANALYSIS: {"action_type": "TRANSITION", "target": "DISPATCH_PLANNING"},
-            AgentState.DISPATCH_PLANNING: {"action_type": "TRANSITION", "target": "EXECUTION"},
-            AgentState.EXECUTION: {"action_type": "TRANSITION", "target": "STABILITY_CHECK"},
-            AgentState.STABILITY_CHECK: {"action_type": "TRANSITION", "target": "TERMINATED"}
-        }
-        return mapping.get(self.current_state, {"action_type": "TRANSITION", "target": "TERMINATED"})
-
+            logging.info(f"[OBSERVATION]: Grid Metrics: {res}")
+    
     def run(self):
-        
-        #THE CONTROL LOOP (Observe -> Think -> Act)
-        
-        #Περιλαμβάνει Max Steps για αποφυγή ατέρμονων βρόχων.
-        
+        """
+        THE CONTROL LOOP: Observe -> Think -> Act (PDF Σελ. 7)
+        Ο κεντρικός βρόχος που καθιστά τον πράκτορα αυτόνομο.
+        """
         logging.info("--- AGENT EXECUTION STARTED ---")
         step = 0
-        while self.is_running and step < 15:
-            # 1. OBSERVE
-            obs = self.observe()
+        max_steps = 15 # Προστασία από ατέρμονους βρόχους (PDF Σελ. 8)
+
+        while self.is_running and step < max_steps:
+            logging.info(f"\n=== STEP {step} | STATE: {self.current_state.name} ===")
+
+            # 1. OBSERVE: Συλλογή δεδομένων από το περιβάλλον (R2)
+            # Τώρα η observe() επιστρέφει πραγματικά δεδομένα από το tools.py
+            observations = self.observe()
             
-            # 2. THINK
-            decision = self.think(obs)
+            # 2. THINK: Λήψη απόφασης από το πραγματικό LLM (R3)
+            # Η think() πλέον καλεί το LLMEngine και το Qwen 2.5
+            decision = self.think(observations)
             
-            # 3. ACT
+            # 3. SLIDING WINDOW: Ενημέρωση ιστορικού (PDF Σελ. 7)
+            # ΑΛΛΑΓΗ: Αποθηκεύουμε την απόφαση σε μορφή που καταλαβαίνει το LLM (role-based)
+            self.history.append({
+                "role": "assistant", 
+                "content": json.dumps(decision)
+            })
+            
+            # Διατήρηση μόνο των τελευταίων N βημάτων (Sliding Window)
+            if len(self.history) > self.max_history:
+                self.history.pop(0)
+
+            # 4. ACT: Python Execution
+            # Η act() τώρα καλεί τα πραγματικά εργαλεία και αλλάζει το State
             self.act(decision)
             
-            # Sliding Window
-            # Αποθηκεύουμε το βήμα στο ιστορικό και αφαιρούμε το παλαιότερο αν ξεπερασουμε το οριο
-            self.history.append({
-                "step": step, 
-                "state": self.current_state.name, 
-                "decision": decision
-            })
-            if len(self.history) > self.max_history:
-                self.history.pop(0) 
-                
             step += 1
-            time.sleep(0.5) # Καθυστέρηση για αναγνωσιμότητα των logs
-        logging.info("--- AGENT EXECUTION TERMINATED ---")
+            time.sleep(1) # Παύση για συγχρονισμό και ανάγνωση των logs
 
+        logging.info(f"--- AGENT EXECUTION TERMINATED at Step {step} ---")
 
 # 4. ENTRY POINT
 if __name__ == "__main__":
