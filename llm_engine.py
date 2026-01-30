@@ -1,22 +1,43 @@
 import json
-import re
+import os
 import logging
-from huggingface_hub import InterfaceClient
+from huggingface_hub import InferenceClient
+
+# Setting up Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("LLMEngine")
 
 # We use Qwen 2.5 Coder because it is great at JSON handling and coding
 # and is available for free in the Hugging Face Inference API.
-
 REPO_ID = "Qwen/Qwen2.5-Coder-32B-Instruct"
 
+# Attempt to import only if we are in Colab
+try:
+  from google.colab import userdata
+  IN_COLAB = True
+except ImportError:
+  IN_COLAB = False
+
 class LLMEngine:
-  def __init__(self, api_token):
+  def __init__(self, api_token=None):
     """
-    Initializes the Hugging Face communication client.
+    Initializes the client. It tries to find the HF_TOKEN from Colab Secrets or from environment variables.
     """
-    if not api_token:
-      raise ValueError("API Token is missing! Please provide a valid Hugging Face token.")
+    self.token = api_token
+
+    if not self.token and IN_COLAB:
+      try:
+        self.token = userdata.get('HF_TOKEN')
+      except Exception:
+        logging.warning("Could not load HF_TOKEN from Colab secrets.")
     
-    self.client = InterfaceClient(model=REPO_ID, token=api_token)
+    if not self.token:
+      self.token = os.getenv('HF_TOKEN')
+    
+    if not self.token:
+      raise ValueError("No API Token found! Pass it as an argument or set HF_TOKEN in secrets.")
+
+    self.client = InferenceClient(model=REPO_ID, token=self.token)
   
   def parse_response(self, response_text):
     """
@@ -25,56 +46,49 @@ class LLMEngine:
     try:
       # Markdown removal if exists
       clean_text = response_text.strip()
+
       if "```json" in clean_text:
         clean_text = clean_text.split("```json")[1].split("```")[0]
       elif "```" in clean_text:
         clean_text = clean_text.split("```")[1].split("```")[0]
-      
-      # Parsing in Python Dict
       return json.loads(clean_text)
 
     except json.JSONDecodeError:
-      logging.error(f"JSON PARSING ERROR. Raw text received: {response_text}")
+      logging.error(f"JSON PARSING ERROR. Raw text: {response_text}")
       # Fallback: Return a special command for the FSM to handle.
       return {
-        "thought": "Failed to parse JSON response. I need to retry or terminate.",
+        "thought": "Failed to parse JSON. I need to retry.",
         "action_type": "TRANSITION",
-        "target": "ADJUSTMENT", # Safety Fallback
-        "params": {"error": "Invalid JSON format"}
+        "target": "ADJUSTMENT",
+        "params": {"error": "Invalid JSON format received from LLM"}
       }
 
   def get_decision(self, system_prompt, history):
     """
-    It sends the history to the LLM and makes a decision.
-    Manages the Context Window (Sliding Window).
+    Sends the prompt and history to LLM.
     """
     messages = [{"role": "system", "content": system_prompt}]
 
-    # CONTEXT WINDOW MANAGEMENT !!!
-    # We only keep the last 6 messages to avoid filling up the memory.
-    # and not to be charged too many tokens.
-    sliding_window_history = history[-6:]
-
-    for msg in sliding_window_history:
+    # Sliding Window: We only keep the last 6 messages for economy and to avoid confusing the model with old data.
+    for msg in history[-6:]:
       messages.append(msg)
     
     try:
-      # API Call
       response = self.client.chat_completion(
         messages=messages,
-        max_tokens=500, # Enough for JSON files, not too much
-        temperature=0.1 # Low in order to be deterministic (stable) (could amp this to 0.2, we'll see)
+        max_tokens=600, # Enough for analytical thought + JSON
+        temperature=0.1 # Low to keep the JSON stable (could amp this to 0.2, we'll see)
       )
 
       raw_content = response.choices[0].message.content
       return self.parse_response(raw_content)
     
     except Exception as e:
-      logging.error(f"API CONNECTION ERROR: {e}")
+      logging.error(f"API ERROR: {e}")
       # Emergency response if the internet or API goes down
       return {
-        "thought": "API Error. Initiating emergency termination.",
+        "thought": "API Connection Error. Terminating safely.",
         "action_type": "TRANSITION",
         "target": "TERMINATED",
-        "params": {}
+        "params": {"error": str(e)}
       }
