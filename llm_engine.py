@@ -1,7 +1,7 @@
 import json
 import os
 import logging
-from huggingface_hub import InterfaceClient
+from huggingface_hub import InferenceClient
 
 # Setting up Logging
 logging.basicConfig(level=logging.INFO)
@@ -37,7 +37,7 @@ class LLMEngine:
     if not self.token:
       raise ValueError("No API Token found! Pass it as an argument or set HF_TOKEN in secrets.")
 
-    self.client = InterfaceClient(model=REPO_ID, token=self.token)
+    self.client = InferenceClient(model=REPO_ID, token=self.token)
   
   def parse_response(self, response_text):
     """
