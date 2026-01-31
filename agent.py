@@ -53,7 +53,7 @@ class EnergyGridAgent:
         # Το LLM είναι stateless
         # το ιστορικό των τελευταίων N βημάτων για να υπάρχει συνείδηση
         self.history = []
-        self.max_history = 5
+        self.max_history = 6
         #LLm Engine απο Cognitive Policy Engineer
         self.llm = llm_engine.LLMEngine(api_token=hf_token)
          
