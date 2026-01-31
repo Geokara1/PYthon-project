@@ -72,9 +72,9 @@ def get_system_prompt(current_state, world_context):
     Task: Create a dispatch plan to meet the demand.
 
     LOGIC RULES:
-    1. Use all available Solar and Wind first.
+    1. Use all available Solar and Wind first (Renewables).
     2. If (Solar+Wind) < Demand, use Gas up to its limit.
-    3. If (Solar+Wind+Gas) < Demand, use MAX Gas (the grid will handle the shortage).
+    3. If (Solar+Wind+Gas) < Demand, the rest is Load Shedding (implicit).
 
     Action: Return a TOOL_CALL for 'dispatch_energy_plan'.
     The params must contain a 'distribution' dictionary.
