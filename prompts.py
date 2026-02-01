@@ -40,27 +40,56 @@ def get_system_prompt(current_state, world_context):
     """
   
   # State 1: Demand Forecasting (Tool Call)
-  elif current_state == "DEMAND_FORECASTING":
-    return base_prompt + """
-    CURRENT STATE: DEMAND_FORECASTING
-    Task: Predict the energy demand for the next hour.
-    Action: Return a TOOL_CALL for 'forecast_energy_demand' with params {"hour_offset": 1}.
-    """
+  elif state_name == "DEMAND_FORECASTING":
+      current_forecast = world_context.get("forecast_mw", 0)
+
+      if current_forecast > 0:
+        return base_prompt + f"""
+        CURRENT STATE: DEMAND_FORECASTING
+        Observation: You have already forecasted demand: {current_forecast} MW.
+        Task: Proceed to analyze generation capacity.
+        Action: Return a TRANSITION to "CAPACITY_ANALYSIS".
+        """
+      else:
+        return base_prompt + """
+        CURRENT STATE: DEMAND_FORECASTING
+        Task: Predict the energy demand for the next hour.
+        Action: Return a TOOL_CALL for 'forecast_energy_demand' with params {"hour_offset": 1}.
+        """
   
   # State 2: Capacity Analysis (Tool Call)
-  elif current_state == "CAPACITY_ANALYSIS":
-    return base_prompt + """
-    CURRENT STATE: CAPACITY_ANALYSIS
-    Task: Check current generation capacity.
-    Action: Return a TOOL_CALL for 'check_generation_capacity' with params {}.
-    """
+  elif state_name == "CAPACITY_ANALYSIS":
+    caps = world_context.get("capacity", {})
+
+    if caps:
+      return base_prompt + f"""
+      CURRENT STATE: CAPACITY_ANALYSIS
+      Observation: Capacity data received: {json.dumps(caps)}.
+      Task: Proceed to planning.
+      Action: Return a TRANSITION to "DISPATCH_PLANNING".
+      """
+    else:
+      return base_prompt + """
+      CURRENT STATE: CAPACITY_ANALYSIS
+      Task: Check current generation capacity.
+      Action: Return a TOOL_CALL for 'check_generation_capacity' with params {}.
+      """
   
   # State 3: Dispatch Planning (The Brain/Reasoning)
-  elif current_state == "DISPATCH_PLANNING":
-    # Extracting data from memory for LLM to view
+  elif state_name == "DISPATCH_PLANNING":
+    
     demand = world_context.get('forecast_mw', 0)
     caps = world_context.get('capacity', {})
+    metrics = world_context.get("last_metrics", {})
 
+    if metrics:
+      return base_prompt + f"""
+      CURRENT STATE: DISPATCH_PLANNING
+      Observation: Plan executed. Metrics received: {json.dumps(metrics)}.
+      Task: Move to execution phase to finalize.
+      Action: Return a TRANSITION to "EXECUTION".
+      """
+    
     return base_prompt + f"""
     CURRENT STATE: DISPATCH_PLANNING
 
@@ -77,7 +106,9 @@ def get_system_prompt(current_state, world_context):
     3. If (Solar+Wind+Gas) < Demand, the rest is Load Shedding (implicit).
 
     Action: Return a TOOL_CALL for 'dispatch_energy_plan'.
-    The params must contain a 'distribution' dictionary.
+
+    IMPORTANT: The params MUST contain a 'distribution' dictionary.
+    DO NOT use 'dispatch_energy'. Use 'dispatch_energy_plan'.
 
     Example Params:
     {{
@@ -86,7 +117,7 @@ def get_system_prompt(current_state, world_context):
     """
   
   # State 4: Execution (Transition)
-  elif current_state == "EXECUTION":
+  elif state_name == "EXECUTION":
     return base_prompt + """
     CURRENT STATE: EXECUTION
     Task: The plan has been sent to the grid. Now check if it worked.
@@ -94,7 +125,7 @@ def get_system_prompt(current_state, world_context):
     """
   
   # State 5: Stability Check (Evaluation)
-  elif current_state == 'STABILITY_CHECK':
+  elif state_name == 'STABILITY_CHECK':
     metrics = world_context.get('last_metrics', {})
 
     return base_prompt + f"""
@@ -104,7 +135,10 @@ def get_system_prompt(current_state, world_context):
     {json.dumps(metrics)}
     -------------------
 
-    Task: Evaluate the result.
+    Task: Evaluate the result using the GRID STATUS provided above.
+    DO NOT call any more tools. The data is already provided.
+
+    Logic:
     - If 'blackout_risk' is 'High' OR 'frequency_deviation' is large (> 0.05), it is a FAILURE.
     - Otherwise, it is a SUCCESS.
 
@@ -114,7 +148,7 @@ def get_system_prompt(current_state, world_context):
     """
 
   # State 6: Adjustment (Replanning)
-  elif current_state == "ADJUSTMENT":
+  elif state_name == "ADJUSTMENT":
     return base_prompt + """
     CURRENT STATE: ADJUSTMENT
     Task: The previous plan was unstable.
