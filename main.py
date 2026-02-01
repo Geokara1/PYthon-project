@@ -2,6 +2,7 @@ import os
 import sys
 import tools
 from agent import EnergyGridAgent
+from logger import logger
 
 def main():
   print("=================================================")
@@ -34,11 +35,17 @@ def main():
   
   print(f"\n Setting up Scenario {scenario_id}...")
   tools.set_scenario(scenario_id)
+  logger.setup(scenario_id)
 
   # Print initial state for verification
-  print(f"   Current Hour: {tools.WORLD_STATE['current_hour']}:00")
-  print(f"   Weather: {tools.WORLD_STATE['weather_condition']}")
-  print(f"   Gas Reserves: {tools.WORLD_STATE['gas_reserve_mw']} MW")
+  # print(f"   Current Hour: {tools.WORLD_STATE['current_hour']}:00")
+  # print(f"   Weather: {tools.WORLD_STATE['weather_condition']}")
+  # print(f"   Gas Reserves: {tools.WORLD_STATE['gas_reserve_mw']} MW")
+
+  #print initial state
+  logger.log("INIT", f"Current Hour: {tools.WORLD_STATE['current_hour']}:00")
+  logger.log("INIT", f"Weather: {tools.WORLD_STATE['weather_condition']}")
+  logger.log("INIT", f"Gas Reserves: {tools.WORLD_STATE['gas_reserve_mw']} MW")
 
   # Initialize and Run Agent
   print("\n Launching Agent...")
@@ -46,9 +53,11 @@ def main():
     bot = EnergyGridAgent(hf_token=token)
     bot.run()
   except KeyboardInterrupt:
-    print("\n Execution interrupted by user.")
+    logger.log("SYSTEM", "Execution interrupted by user.")
   except Exception as e:
-    print(f"\n CRITICAL ERROR: {e}")
+    logger.log("CRITICAL ERROR", str(e))
+  finally:
+    logger.close()
 
 if __name__ == "__main__":
   main()

@@ -1,29 +1,15 @@
 import json
 import time
-import logging
+from logger import logger
 import random
 from enum import Enum, auto
 
-#Import modules from team members
-
+# Import modules from team members
 import tools          # Environment & Tools (R2)
 import prompts        # Policy Prompts (R3)
 import llm_engine     # LLM Connectivity (R3)
 
-
-
-# 1. EXECUTION TRACE LOGGING 
-# Configured to display [STATE], [PROMPT], [RAW LLM], [ACTION], [OBSERVATION].
-# These logs are mandatory deliverables (Killer Criterion).
-
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S'
-)
-
-# 2. FORMAL STATE MODE - STATES
-# Includes the ADJUSTMENT state for the mandatory Replanning requirement.
+# FORMAL STATE MODE - STATES
 
 class AgentState(Enum):
     INITIALIZING = auto()       
@@ -35,12 +21,11 @@ class AgentState(Enum):
     ADJUSTMENT = auto()         # Replanning / Correction State
     TERMINATED = auto()         # Final State
 
-
-# 3. THE AGENT CLASS 
+# AGENT CLASS 
 class EnergyGridAgent:
     
     def __init__(self,hf_token=None): #SOS Hf_token For API key
-    # current_state: The FSM control variable
+        # current_state: The FSM control variable
         self.current_state = AgentState.INITIALIZING
         self.is_running = True
         
@@ -52,61 +37,58 @@ class EnergyGridAgent:
         }
         
         # SLIDING WINDOW MEMORY 
-        #  LLM is stateless
-        # Maintains the last N steps to provide context to the stateless LLM.
         self.history = []
         self.max_history = 6
+
         # LLM Engine provided by the Cognitive Policy Engineer (R3)
         self.llm = llm_engine.LLMEngine(api_token=hf_token)
          
     def observe(self):
         """
-        OBSERVE: Collect current internal state and memory
+        Collect current internal state and memory
              
         """
-        logging.info(f"[STATE]: {self.current_state.name}")
+        logger.log("STATE", self.current_state.name)
         return self.memory
 
     def think(self, observations):
-        
-        #THINK 
+        """
+        Generate Prompt -> Call LLM -> Get Decision
+        """
         
         # system Prompt απο Cοnstraint Enforcement
         system_prompt = prompts.get_system_prompt(self.current_state, observations)
         
         # Log the actual prompt sent to LLM
-        logging.info(f"[PROMPT]: {system_prompt}")
+        logger.log("PROMPT", system_prompt)
         
-        # Use Self.llm which is in __init__
-         # Call the get_decision method of Constraint Enforcement
+        # Call the LLM
         decision = self.llm.get_decision(system_prompt, self.history)
 
-        logging.info(f"[RAW LLM]: {json.dumps(decision)}")
+        logger.log("RAW LLM", json.dumps(decision))
 
-        
         return decision
 
     def act(self, decision):
-
-        # ACT Execution of the LLM decision
-        # Separates actions into Tool Calls and Transitions
-        
+        """
+        Execute the LLM decision (Transition or Tool Call)
+        """
         action_type = decision.get("action_type")
         target = decision.get("target")
         params =decision.get("params",{})
 
         if action_type == "TRANSITION":
-                logging.info(f"[ACTION]: Transitioning to {target}")
-                try:
+            logger.log("ACTION", f"Transitioning to {target}")
+            try:
                 # Convert String from LLM to AgentState Enum
-                    self.current_state = AgentState[target]
-                except KeyError:
-                    logging.error(f"Invalid State Name: {target}. Defaulting to ADJUSTMENT.")
-                    self.current_state = AgentState.ADJUSTMENT
+                self.current_state = AgentState[target]
+            except KeyError:
+                logger.log("ERROR", f"Invalid State Name: {target}. Defaulting to ADJUSTMENT.")
+                self.current_state = AgentState.ADJUSTMENT
         
         elif action_type == "TOOL_CALL":
             # External function call
-            logging.info(f"[ACTION]: Executing Tool {target}")
+            logger.log("ACTION", f"Executing Tool {target} with params {params}")
             self._update_memory_from_tool(target, params)
 
         # Check for termination
@@ -116,80 +98,69 @@ class EnergyGridAgent:
     def _update_memory_from_tool(self, tool_name, params):
         """
         INTERFACE with R2 TOOLS
-        Observations are updated here
-        after each tool call.
         """
-         # 1. Connection with Demand Forecasting Tool
-        if tool_name == "forecast_energy_demand":
-        # Receive parameter from LLM
-            offset = params.get("hour_offset", 1)
-        # Call the actual R2 tool
-            res = tools.forecast_energy_demand(offset)
-        # Update the agent's "Truth"
-            self.memory["forecast_mw"] = res
-            logging.info(f"[OBSERVATION]: Predicted demand: {res} MW")
+        try:
+            # Demand Forecasting Tool
+            if tool_name == "forecast_energy_demand":
+                offset = params.get("hour_offset", 1)
+                res = tools.forecast_energy_demand(offset)
+                self.memory["forecast_mw"] = res
+                logger.log("OBSERVATION", f"Predicted demand: {res} MW")
 
-    # 2. Connection with Source Control Tool
-        elif tool_name == "check_generation_capacity":
-        # Call the R2 tool
-            res = tools.check_generation_capacity()
-            self.memory["capacity"] = res
-            logging.info(f"[OBSERVATION]: Available capacity: {res}")
+            # Source Control Tool
+            elif tool_name == "check_generation_capacity":
+                res = tools.check_generation_capacity()
+                self.memory["capacity"] = res
+                logger.log("OBSERVATION", f"Available capacity: {res}")
 
-    # 3. Connection with Plan Execution Tool
-        elif tool_name == "dispatch_energy_plan":
-        # Receive the plan decided by the LLM
-            dist = params.get("distribution", {})
-        # Implementation on the grid via R2
-            res = tools.dispatch_energy_plan(dist)
-        # Store stability metrics (Critical for Feedback Loop)
-            self.memory["last_metrics"] = res
+            #Plan Execution Tool
+            elif tool_name == "dispatch_energy_plan":
+                dist = params.get("distribution", {})
+                res = tools.dispatch_energy_plan(dist)
+                self.memory["last_metrics"] = res
+                logger.log("OBSERVATION", f"Grid Metrics: {res}")
 
-            
-            logging.info(f"[OBSERVATION]: Grid Metrics: {res}")
+            else:
+                logger.log("WARNING", f"Unknown tool called: {tool_name}")
+        
+        except Exception as e:
+            logger.log("CRITICAL ERROR", f"Tool execution failed: {e}")
     
     def run(self):
         """
-        THE CONTROL LOOP: Observe -> Think -> Act (PDF Σελ. 7)
-        The central loop that makes the agent autonomous.
+        THE CONTROL LOOP: Observe -> Think -> Act
         """
-        logging.info("--- AGENT EXECUTION STARTED ---")
+        logger.log("SYSTEM", "--- AGENT EXECUTION STARTED ---")
         step = 0
-        max_steps = 15 # Protection from infinite loops
+        max_steps = 20 # Protection from infinite loops
 
         while self.is_running and step < max_steps:
-            logging.info(f"\n=== STEP {step} | STATE: {self.current_state.name} ===")
+            print(f"\n--- STEP {step} ---")
 
-            # 1. OBSERVE: Data collection from the environment (R2)
-            # Now observe() returns actual data from tools.py
+            # OBSERVE
             observations = self.observe()
             
-            # 2. THINK: Decision making from the actual LLM (R3)
-            # think() now calls LLMEngine and Qwen 2.5
+            # THINK
             decision = self.think(observations)
             
-            # 3. SLIDING WINDOW: Update history
-            # CHANGE: We store the decision in a format understood by the LLM (role-based)
+            # SLIDING WINDOW
             self.history.append({
                 "role": "assistant", 
                 "content": json.dumps(decision)
             })
             
-            # Keep only the last N steps (Sliding Window)
             if len(self.history) > self.max_history:
                 self.history.pop(0)
 
-            # 4. ACT: Python Execution
-            # act() now calls the actual tools and changes the State
+            # ACT
             self.act(decision)
             
             step += 1
-            time.sleep(1) # Pause for synchronization and log reading
+            time.sleep(1) # Pause for readability
 
-        logging.info(f"--- AGENT EXECUTION TERMINATED at Step {step} ---")
+        logger.log("SYSTEM", f"--- AGENT EXECUTION TERMINATED at Step {step} ---")
 
-# 4. ENTRY POINT
+# ENTRY POINT
 if __name__ == "__main__":
-    # Creation and startup of the agent
     agent = EnergyGridAgent()
     agent.run()
